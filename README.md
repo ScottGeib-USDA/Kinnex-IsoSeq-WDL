@@ -79,6 +79,31 @@ input to its location. Replace every `<local_path_prefix>` placeholder with
 paths visible to the workflow jobs, and edit the sample sheet to describe the
 barcode and sample assignments for your run.
 
+You can also generate most run-specific JSON fields directly from SMRT Link
+run output by scanning the run directory for `hifi_reads` BAMs:
+
+```bash
+python3 scripts/build_inputs_from_smrtlink.py \
+  --workflow kinnex_isoseq \
+  --run-dir <local_path_prefix>/r84039_241003_193617 \
+  --biosample-csv <local_path_prefix>/samples/biosamples.csv \
+  --output-json backends/hpc/kinnex_isoseq.auto.inputs.json
+```
+
+If you run the helper from a run directory, it can auto-detect a single
+`biosample*.csv` and writes `<workflow>.auto.inputs.json` in the current
+directory:
+
+```bash
+cd <local_path_prefix>/r84039_241003_193617
+python3 /path/to/Kinnex-IsoSeq-WDL/scripts/build_inputs_from_smrtlink.py \
+  --workflow preprocessing
+```
+
+The helper fills `hifi_sources`, `biosample_csv`, and `output_prefix` using the
+mode-specific HPC template. Use `--mode no_instrument_demux` or
+`--mode from_instrument_demux` when you need to force a mode.
+
 ### Run the workflow
 
 ```bash
