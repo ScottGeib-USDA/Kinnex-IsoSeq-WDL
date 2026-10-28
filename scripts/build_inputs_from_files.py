@@ -103,6 +103,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--segmentation-adapter-set",
+        choices=["8-fold", "12-fold", "16-fold"],
+        help=(
+            "Optional segmentation adapter set to write into the output JSON. "
+            "If omitted, the template value is preserved."
+        ),
+    )
+    parser.add_argument(
         "--path-prefix-rewrite",
         nargs=2,
         metavar=("OLD_PREFIX", "NEW_PREFIX"),
@@ -304,6 +312,9 @@ def main() -> int:
         rewrite=rewrite,
     )
     output_json[f"{ns}.biosample_csv"] = rewrite_path(biosample_csv, rewrite)
+
+    if args.segmentation_adapter_set is not None:
+        output_json[f"{ns}.segmentation_adapter_set"] = args.segmentation_adapter_set
 
     if ns == "kinnex_isoseq":
         output_json[f"{ns}.output_prefix"] = args.output_prefix or run_dir.name
