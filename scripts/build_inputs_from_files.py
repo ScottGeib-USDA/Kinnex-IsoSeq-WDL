@@ -27,6 +27,7 @@ TEMPLATE_BY_WORKFLOW_AND_MODE = {
 }
 
 RAW_HIFI_SUFFIX = ".hifi_reads.bam"
+HIFI_READS_MARKER = ".hifi_reads."
 DEMUX_HIFI_PATTERN = re.compile(r"\.hifi_reads\.([^.]+)\.bam$")
 
 
@@ -123,9 +124,6 @@ def discover_hifi_bams(run_dir: Path) -> tuple[list[Path], list[DemuxEntry]]:
     demux_candidates: list[DemuxEntry] = []
     for bam in sorted(run_dir.rglob("*.bam")):
         name = bam.name
-        if RAW_HIFI_SUFFIX not in name:
-            continue
-
         demux_match = DEMUX_HIFI_PATTERN.search(name)
         if demux_match:
             token = demux_match.group(1)
@@ -136,6 +134,11 @@ def discover_hifi_bams(run_dir: Path) -> tuple[list[Path], list[DemuxEntry]]:
 
         if name.endswith(RAW_HIFI_SUFFIX):
             raw_candidates.append(bam.resolve())
+            continue
+
+        # Ignore unrelated BAMs; only names with the hifi_reads marker are in scope.
+        if HIFI_READS_MARKER not in name:
+            continue
 
     return raw_candidates, demux_candidates
 
