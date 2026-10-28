@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Build workflow input JSON files from SMRT Link run outputs.
+"""Build workflow input JSON files from local run files.
 
-This helper fills the run-specific hifi_sources and biosample_csv inputs for the
-public HPC templates by inspecting a SMRT Link run directory.
+For preprocessing and kinnex_isoseq, this helper fills run-specific hifi_sources
+and biosample_csv inputs by inspecting a run directory. For secondary_analysis,
+it discovers FLNC BAMs.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,11 +28,13 @@ TEMPLATE_BY_WORKFLOW_AND_MODE = {
     ),
     ("preprocessing", "no_instrument_demux"): Path("backends/hpc/preprocessing.hpc.inputs.json"),
     ("preprocessing", "from_instrument_demux"): Path("backends/hpc/preprocessing.hpc.inputs.json"),
+    ("secondary_analysis", "flnc"): Path("backends/hpc/secondary_analysis.hpc.inputs.json"),
 }
 
 RAW_HIFI_SUFFIX = ".hifi_reads.bam"
 HIFI_READS_MARKER = ".hifi_reads."
 DEMUX_HIFI_PATTERN = re.compile(r"\.hifi_reads\.([^.]+)\.bam$")
+BIOSAMPLE_ALLOWED_SAMPLE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass(frozen=True)
@@ -40,8 +46,9 @@ class DemuxEntry:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build a workflow inputs JSON from SMRT Link hifi_reads outputs. "
-            "The tool auto-detects run mode and fills hifi_sources."
+            "Build a workflow inputs JSON from local BAM/CSV files. "
+            "For preprocessing/kinnex modes it auto-detects hifi_sources; "
+            "for secondary_analysis it discovers FLNC BAMs."
         )
     )
     parser.add_argument(
@@ -54,9 +61,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--workflow",
-        choices=["kinnex_isoseq", "preprocessing"],
-        default="kinnex_isoseq",
+        "workflow",
+        choices=["kinnex_isoseq", "preprocessing", "secondary_analysis"],
         help="Workflow namespace to populate in the output JSON.",
     )
     parser.add_argument(
@@ -64,7 +70,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path.cwd(),
         help=(
-            "SMRT Link run output directory that contains hifi_reads BAM files. "
+            "Run directory to scan for inputs. For preprocessing/kinnex it scans "
+            "for hifi_reads BAMs; for secondary_analysis it scans for *.flnc.bam. "
             "Defaults to the current working directory."
         ),
     )
@@ -73,14 +80,19 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "Path to the 3-column biosample CSV used by the workflow. "
-            "When omitted, the tool auto-detects one CSV under --run-dir."
+            "When omitted, the tool auto-detects one CSV in --run-dir. "
+            "Not used for secondary_analysis."
         ),
     )
     parser.add_argument(
         "--mode",
         choices=["auto", "no_instrument_demux", "from_instrument_demux"],
         default="auto",
-        help="Run mode. Auto infers mode from discovered hifi_reads BAM names.",
+        help=(
+            "Run mode for preprocessing/kinnex workflows. "
+            "Auto infers mode from discovered hifi_reads BAM names. "
+            "Not used for secondary_analysis."
+        ),
     )
     parser.add_argument(
         "--template-json",
@@ -151,6 +163,74 @@ def discover_hifi_bams(run_dir: Path) -> tuple[list[Path], list[DemuxEntry]]:
     return raw_candidates, demux_candidates
 
 
+def discover_flnc_bams(run_dir: Path) -> list[Path]:
+    flnc_candidates = sorted(
+        {
+            bam.resolve()
+            for bam in run_dir.rglob("*.bam")
+            if bam.name.endswith(".flnc.bam")
+        }
+    )
+    if len(flnc_candidates) == 0:
+        raise ValueError(
+            "no FLNC BAM files were found under --run-dir; expected one or more *.flnc.bam files"
+        )
+    return flnc_candidates
+
+
+def validate_flnc_sm_tags_with_samtools(flnc_bams: list[Path]) -> list[str]:
+    warnings: list[str] = []
+    samtools = shutil.which("samtools")
+    if samtools is None:
+        warnings.append(
+            "samtools was not found in PATH; skipping optional FLNC SM-tag validation"
+        )
+        return warnings
+
+    for bam in flnc_bams:
+        result = subprocess.run(
+            [samtools, "view", "-H", str(bam)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or "unknown samtools error"
+            warnings.append(f"{bam}: could not read BAM header with samtools ({message})")
+            continue
+
+        rg_lines = [line for line in result.stdout.splitlines() if line.startswith("@RG\t")]
+        if not rg_lines:
+            warnings.append(f"{bam}: no @RG records found; secondary_analysis expects SM tags")
+            continue
+
+        sm_values: list[str] = []
+        missing_sm = 0
+        for rg_line in rg_lines:
+            sm_value = None
+            for field in rg_line.split("\t")[1:]:
+                if field.startswith("SM:"):
+                    sm_value = field[3:]
+                    break
+            if sm_value is None or sm_value.strip() == "":
+                missing_sm += 1
+                continue
+            sm_values.append(sm_value)
+
+        if missing_sm > 0:
+            warnings.append(f"{bam}: {missing_sm} @RG record(s) missing non-empty SM tag")
+
+        unique_sm_values = set(sm_values)
+        if len(unique_sm_values) > 1:
+            preview = ", ".join(sorted(unique_sm_values)[:3])
+            warnings.append(
+                f"{bam}: multiple SM values detected in @RG ({preview}); "
+                "secondary_analysis expects one SM per BAM"
+            )
+
+    return warnings
+
+
 def discover_biosample_csv(run_dir: Path) -> Path:
     candidates = sorted(
         {
@@ -172,6 +252,71 @@ def discover_biosample_csv(run_dir: Path) -> Path:
             f"{found}"
         )
     return candidates[0]
+
+
+def is_valid_barcode_pair(value: str) -> bool:
+    return value.count("--") == 1 and all(part != "" for part in value.split("--"))
+
+
+def validate_biosample_csv(path: Path) -> None:
+    expected_header = ["HiFi Barcode", "cDNA Barcode", "Bio Sample"]
+    errors: list[str] = []
+    seen_cdna_per_hifi: dict[str, set[str]] = {}
+
+    with path.open("rt", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        header = next(reader, None)
+        if header is None:
+            raise ValueError(f"biosample CSV is empty: {path}")
+        if [col.strip() for col in header] != expected_header:
+            raise ValueError(
+                "biosample CSV header must be exactly: "
+                "HiFi Barcode,cDNA Barcode,Bio Sample"
+            )
+
+        for row_number, row in enumerate(reader, start=2):
+            # Empty rows are allowed and ignored.
+            if len(row) == 0 or all(cell.strip() == "" for cell in row):
+                continue
+
+            if len(row) != 3:
+                errors.append(f"line {row_number}: expected 3 columns, found {len(row)}")
+                continue
+
+            hifi_barcode, cdna_barcode, bio_sample = (cell.strip() for cell in row)
+
+            if hifi_barcode == "" or cdna_barcode == "" or bio_sample == "":
+                errors.append(f"line {row_number}: each row must have three non-empty fields")
+                continue
+
+            if not is_valid_barcode_pair(hifi_barcode):
+                errors.append(
+                    f"line {row_number}: HiFi Barcode must be an exact two-part pair separated by '--'"
+                )
+
+            if not is_valid_barcode_pair(cdna_barcode):
+                errors.append(
+                    f"line {row_number}: cDNA Barcode must be an exact two-part pair separated by '--'"
+                )
+
+            if len(bio_sample) > 40:
+                errors.append(f"line {row_number}: Bio Sample must be 40 characters or fewer")
+
+            if not BIOSAMPLE_ALLOWED_SAMPLE_NAME.fullmatch(bio_sample):
+                errors.append(
+                    f"line {row_number}: Bio Sample may contain only letters, numbers, '_' and '-'"
+                )
+
+            seen_cdna = seen_cdna_per_hifi.setdefault(hifi_barcode, set())
+            if cdna_barcode in seen_cdna:
+                errors.append(
+                    f"line {row_number}: duplicate cDNA Barcode '{cdna_barcode}' within HiFi Barcode group '{hifi_barcode}'"
+                )
+            else:
+                seen_cdna.add(cdna_barcode)
+
+    if errors:
+        raise ValueError("biosample CSV validation failed:\n  - " + "\n  - ".join(errors))
 
 
 def resolve_repo_root(args: argparse.Namespace) -> Path:
@@ -285,14 +430,29 @@ def main() -> int:
     repo_root = resolve_repo_root(args)
     run_dir = args.run_dir.resolve()
 
-    raw_candidates, demux_candidates = discover_hifi_bams(run_dir)
-    mode = infer_mode(args.mode, raw_candidates, demux_candidates)
+    mode = "flnc" if args.workflow == "secondary_analysis" else "auto"
+    raw_candidates: list[Path] = []
+    demux_candidates: list[DemuxEntry] = []
+    flnc_candidates: list[Path] = []
+    biosample_csv: Path | None = None
 
-    biosample_csv = (
-        args.biosample_csv.resolve()
-        if args.biosample_csv is not None
-        else discover_biosample_csv(run_dir)
-    )
+    if args.workflow == "secondary_analysis":
+        flnc_candidates = discover_flnc_bams(run_dir)
+        if args.mode != "auto":
+            raise ValueError("--mode is not used with --workflow secondary_analysis")
+        if args.biosample_csv is not None:
+            raise ValueError("--biosample-csv is not used with --workflow secondary_analysis")
+        for warning in validate_flnc_sm_tags_with_samtools(flnc_candidates):
+            print(f"WARNING: {warning}", file=sys.stderr)
+    else:
+        raw_candidates, demux_candidates = discover_hifi_bams(run_dir)
+        mode = infer_mode(args.mode, raw_candidates, demux_candidates)
+        biosample_csv = (
+            args.biosample_csv.resolve()
+            if args.biosample_csv is not None
+            else discover_biosample_csv(run_dir)
+        )
+        validate_biosample_csv(biosample_csv)
 
     rewrite: tuple[Path, Path] | None = None
     if args.path_prefix_rewrite is not None:
@@ -305,18 +465,29 @@ def main() -> int:
         output_json = json.load(handle)
 
     ns = args.workflow
-    output_json[f"{ns}.hifi_sources"] = build_hifi_sources(
-        mode=mode,
-        raw_candidates=raw_candidates,
-        demux_candidates=demux_candidates,
-        rewrite=rewrite,
-    )
-    output_json[f"{ns}.biosample_csv"] = rewrite_path(biosample_csv, rewrite)
+
+    if ns == "secondary_analysis":
+        output_json[f"{ns}.flnc_bams"] = [
+            rewrite_path(flnc_bam, rewrite)
+            for flnc_bam in flnc_candidates
+        ]
+    else:
+        output_json[f"{ns}.hifi_sources"] = build_hifi_sources(
+            mode=mode,
+            raw_candidates=raw_candidates,
+            demux_candidates=demux_candidates,
+            rewrite=rewrite,
+        )
+        output_json[f"{ns}.biosample_csv"] = rewrite_path(biosample_csv, rewrite)
 
     if args.segmentation_adapter_set is not None:
+        if ns == "secondary_analysis":
+            raise ValueError(
+                "--segmentation-adapter-set is only valid for preprocessing or kinnex_isoseq workflows"
+            )
         output_json[f"{ns}.segmentation_adapter_set"] = args.segmentation_adapter_set
 
-    if ns == "kinnex_isoseq":
+    if ns in {"kinnex_isoseq", "secondary_analysis"}:
         output_json[f"{ns}.output_prefix"] = args.output_prefix or run_dir.name
 
     output_json_path = args.output_json or (run_dir / f"{ns}.auto.inputs.json")
@@ -329,9 +500,13 @@ def main() -> int:
     print(f"Mode: {mode}")
     print(f"Template: {template_path}")
     print(f"Run directory: {run_dir}")
-    print(f"Biosample CSV: {biosample_csv}")
+    if biosample_csv is not None:
+        print(f"Biosample CSV: {biosample_csv}")
     print(f"Wrote: {output_json_path.resolve()}")
-    print(f"HiFi sources: {len(output_json[f'{ns}.hifi_sources'])}")
+    if ns == "secondary_analysis":
+        print(f"FLNC BAMs: {len(output_json[f'{ns}.flnc_bams'])}")
+    else:
+        print(f"HiFi sources: {len(output_json[f'{ns}.hifi_sources'])}")
     return 0
 
 

@@ -84,7 +84,7 @@ run output by scanning the run directory for `hifi_reads` BAMs:
 
 ```bash
 python3 scripts/build_inputs_from_files.py \
-  --workflow kinnex_isoseq \
+  kinnex_isoseq \
   --run-dir <local_path_prefix>/r84039_241003_193617 \
   --biosample-csv <local_path_prefix>/samples/biosamples.csv \
   --output-json backends/hpc/kinnex_isoseq.auto.inputs.json
@@ -97,12 +97,20 @@ directory:
 ```bash
 cd <local_path_prefix>/r84039_241003_193617
 python3 /path/to/Kinnex-IsoSeq-WDL/scripts/build_inputs_from_files.py \
-  --workflow preprocessing
+  preprocessing
 ```
 
 The helper fills `hifi_sources`, `biosample_csv`, and `output_prefix` using the
 mode-specific HPC template. Use `--mode no_instrument_demux` or
 `--mode from_instrument_demux` when you need to force a mode.
+
+To create a `secondary_analysis` JSON from existing FLNC BAMs, run from a
+directory that contains one or more `*.flnc.bam` files (or set `--run-dir`):
+
+```bash
+python3 scripts/build_inputs_from_files.py \
+  secondary_analysis
+```
 
 ### Run the workflow
 
