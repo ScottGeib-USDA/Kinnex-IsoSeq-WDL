@@ -123,12 +123,37 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--hifi-demux-barcodes",
+        type=Path,
+        help="Optional custom HiFi-demultiplexing barcode FASTA.",
+    )
+    parser.add_argument(
+        "--indexed-primers",
+        type=Path,
+        help="Optional custom Iso-Seq indexed-primer FASTA.",
+    )
+    parser.add_argument(
+        "--segmentation-adapters",
+        type=Path,
+        help="Optional custom Skera segmentation-adapter FASTA.",
+    )
+    parser.add_argument(
+        "--genome-fasta",
+        type=Path,
+        help="Optional custom uncompressed reference genome FASTA.",
+    )
+    parser.add_argument(
+        "--annotation-gtf-gz",
+        type=Path,
+        help="Optional matching compressed annotation GTF for a custom genome.",
+    )
+    parser.add_argument(
         "--path-prefix-rewrite",
         nargs=2,
         metavar=("OLD_PREFIX", "NEW_PREFIX"),
         help=(
             "Optional absolute-prefix rewrite applied to discovered BAM paths and "
-            "the biosample CSV path before writing JSON."
+            "the biosample CSV and reference override paths before writing JSON."
         ),
     )
     return parser.parse_args()
@@ -383,6 +408,43 @@ def rewrite_path(path: Path, rewrite: tuple[Path, Path] | None) -> str:
     return str((new_prefix / suffix).resolve())
 
 
+def build_reference_overrides(
+    args: argparse.Namespace,
+    workflow: str,
+    rewrite: tuple[Path, Path] | None,
+) -> dict[str, str]:
+    requested = {
+        "hifi_demux_barcodes": args.hifi_demux_barcodes,
+        "indexed_primers": args.indexed_primers,
+        "segmentation_adapters": args.segmentation_adapters,
+        "genome_fasta": args.genome_fasta,
+        "annotation_gtf_gz": args.annotation_gtf_gz,
+    }
+    supplied = {name: path for name, path in requested.items() if path is not None}
+    supported = {
+        "kinnex_isoseq": set(requested),
+        "preprocessing": {
+            "hifi_demux_barcodes",
+            "indexed_primers",
+            "segmentation_adapters",
+        },
+        "secondary_analysis": {"genome_fasta", "annotation_gtf_gz"},
+    }[workflow]
+    unsupported = sorted(set(supplied) - supported)
+    if unsupported:
+        flags = ", ".join(f"--{name.replace('_', '-')}" for name in unsupported)
+        raise ValueError(f"{flags} cannot be used with --workflow {workflow}")
+    if "genome_fasta" in supplied and "annotation_gtf_gz" not in supplied:
+        raise ValueError("--genome-fasta requires --annotation-gtf-gz with the matching annotation")
+
+    overrides: dict[str, str] = {}
+    for name, path in supplied.items():
+        if not path.is_file():
+            raise ValueError(f"--{name.replace('_', '-')} is not a file: {path}")
+        overrides[name] = rewrite_path(path, rewrite)
+    return overrides
+
+
 def resolve_template_path(repo_root: Path, args: argparse.Namespace, mode: str) -> Path:
     if args.template_json is not None:
         template_path = args.template_json
@@ -460,11 +522,25 @@ def main() -> int:
         new_prefix = Path(args.path_prefix_rewrite[1]).resolve()
         rewrite = (old_prefix, new_prefix)
 
+    reference_overrides = build_reference_overrides(args, args.workflow, rewrite)
+
     template_path = resolve_template_path(repo_root, args, mode)
     with template_path.open("rt", encoding="utf-8") as handle:
         output_json = json.load(handle)
 
     ns = args.workflow
+
+    if reference_overrides:
+        override_key = f"{ns}.reference_overrides"
+        template_overrides = output_json.get(override_key, {})
+        if not isinstance(template_overrides, dict):
+            raise ValueError(f"{override_key} in the template must be a JSON object")
+        template_overrides.update(reference_overrides)
+        output_json[override_key] = template_overrides
+        if "indexed_primers" in reference_overrides:
+            output_json.pop(f"{ns}.isoseq_primers_set", None)
+        if "segmentation_adapters" in reference_overrides:
+            output_json.pop(f"{ns}.segmentation_adapter_set", None)
 
     if ns == "secondary_analysis":
         output_json[f"{ns}.flnc_bams"] = [

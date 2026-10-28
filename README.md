@@ -104,6 +104,16 @@ The helper fills `hifi_sources`, `biosample_csv`, and `output_prefix` using the
 mode-specific HPC template. Use `--mode no_instrument_demux` or
 `--mode from_instrument_demux` when you need to force a mode.
 
+Optional reference-file flags add or replace fields under the workflow's
+`reference_overrides` object: `--hifi-demux-barcodes`, `--indexed-primers`,
+`--segmentation-adapters`, `--genome-fasta`, and `--annotation-gtf-gz`. For
+example, use `--indexed-primers /refs/custom_primers.fasta` to select custom
+primers. `--genome-fasta` requires a matching `--annotation-gtf-gz`. Barcode and
+primer flags apply to `preprocessing` and `kinnex_isoseq`; genome and annotation
+flags apply to `kinnex_isoseq` and `secondary_analysis`. When custom primers or
+adapters are supplied, the helper removes the corresponding packaged-set
+selector from the generated JSON.
+
 To create a `secondary_analysis` JSON from existing FLNC BAMs, run from a
 directory that contains one or more `*.flnc.bam` files (or set `--run-dir`):
 
