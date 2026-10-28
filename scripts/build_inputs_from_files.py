@@ -44,6 +44,15 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
+        "--repo-dir",
+        type=Path,
+        help=(
+            "Path to the Kinnex-IsoSeq-WDL repository root that contains "
+            "backends/hpc. When omitted, the tool checks the current working "
+            "directory, then ./Kinnex-IsoSeq_WDL, then ./Kinnex-IsoSeq-WDL."
+        ),
+    )
+    parser.add_argument(
         "--workflow",
         choices=["kinnex_isoseq", "preprocessing"],
         default="kinnex_isoseq",
@@ -135,23 +144,46 @@ def discover_biosample_csv(run_dir: Path) -> Path:
     candidates = sorted(
         {
             path.resolve()
-            for path in run_dir.rglob("*.csv")
+            for path in run_dir.glob("*.csv")
             if "biosample" in path.name.lower()
         }
     )
     if len(candidates) == 0:
         raise ValueError(
-            "could not auto-detect biosample CSV under --run-dir; "
+            "could not auto-detect biosample CSV in --run-dir; "
             "provide --biosample-csv"
         )
     if len(candidates) > 1:
         found = "\n".join(f"  - {path}" for path in candidates)
         raise ValueError(
-            "found multiple biosample CSV candidates under --run-dir; "
+            "found multiple biosample CSV candidates in --run-dir; "
             "provide --biosample-csv explicitly:\n"
             f"{found}"
         )
     return candidates[0]
+
+
+def resolve_repo_root(args: argparse.Namespace) -> Path:
+    if args.repo_dir is not None:
+        candidates = [args.repo_dir.resolve()]
+    else:
+        cwd = Path.cwd().resolve()
+        candidates = [
+            cwd,
+            cwd / "Kinnex-IsoSeq_WDL",
+            cwd / "Kinnex-IsoSeq-WDL",
+        ]
+
+    for candidate in candidates:
+        if (candidate / "backends" / "hpc").is_dir():
+            return candidate
+
+    searched = "\n".join(f"  - {candidate}" for candidate in candidates)
+    raise ValueError(
+        "could not find repository root with backends/hpc. "
+        "Set --repo-dir explicitly. Checked:\n"
+        f"{searched}"
+    )
 
 
 def infer_mode(
@@ -239,7 +271,7 @@ def build_hifi_sources(
 
 def main() -> int:
     args = parse_args()
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = resolve_repo_root(args)
     run_dir = args.run_dir.resolve()
 
     raw_candidates, demux_candidates = discover_hifi_bams(run_dir)

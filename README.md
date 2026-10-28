@@ -83,7 +83,7 @@ You can also generate most run-specific JSON fields directly from SMRT Link
 run output by scanning the run directory for `hifi_reads` BAMs:
 
 ```bash
-python3 scripts/build_inputs_from_smrtlink.py \
+python3 scripts/build_inputs_from_files.py \
   --workflow kinnex_isoseq \
   --run-dir <local_path_prefix>/r84039_241003_193617 \
   --biosample-csv <local_path_prefix>/samples/biosamples.csv \
@@ -96,7 +96,7 @@ directory:
 
 ```bash
 cd <local_path_prefix>/r84039_241003_193617
-python3 /path/to/Kinnex-IsoSeq-WDL/scripts/build_inputs_from_smrtlink.py \
+python3 /path/to/Kinnex-IsoSeq-WDL/scripts/build_inputs_from_files.py \
   --workflow preprocessing
 ```
 
