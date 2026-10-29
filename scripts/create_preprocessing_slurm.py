@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_REPO_URL = "https://github.com/ScottGeib-USDA/Kinnex-IsoSeq-WDL.git"
@@ -14,21 +16,34 @@ DEFAULT_CONDA_ENV = "/home/scott.geib/.conda/envs/isoseq_wdl"
 DEFAULT_MINIWDL_CONFIG = "~/.config/miniwdl.cfg"
 BUILDER_RELATIVE_PATH = Path("scripts/build_inputs_from_files.py")
 WORKFLOW_RELATIVE_PATH = Path("workflows/preprocessing.wdl")
+PLEX_ADAPTER_PATTERN = re.compile(r"(?<!\d)(8|12|16)Plex\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class PreparedRun:
+    run_dir: Path
+    biosample_csv: Path
+    inputs_json: Path
+    hifi_bam_count: int
+    segmentation_adapter_set: str | None
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Find a HiFi BAM and biosample CSV in a run folder, clone or reuse "
-            "Kinnex-IsoSeq-WDL, generate preprocessing inputs JSON, and write "
-            "an Atlas Slurm script."
+            "Find one run folder or a folder of run folders, clone or reuse "
+            "Kinnex-IsoSeq-WDL, generate per-run preprocessing inputs JSON, and "
+            "write one Atlas Slurm script to process the runs sequentially."
         )
     )
     parser.add_argument(
         "--run-dir",
         type=Path,
         default=Path.cwd(),
-        help="Folder containing the HiFi BAM symlink(s) and biosample CSV (default: current directory).",
+        help=(
+            "A single run folder, or a parent folder whose immediate child folders "
+            "are runs (default: current directory)."
+        ),
     )
     parser.add_argument(
         "--repo-url",
@@ -48,17 +63,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--biosample-csv",
         type=Path,
-        help="Explicit biosample CSV path; otherwise detect one in --run-dir.",
+        help="Use this biosample CSV for every run; otherwise detect one per run folder.",
     )
     parser.add_argument(
         "--inputs-json",
         type=Path,
-        help="Generated inputs JSON path (default: <run-dir>/preprocessing.auto.inputs.json).",
+        help=(
+            "Inputs JSON path for a single run. With multiple runs, this filename "
+            "is written separately into each run folder."
+        ),
     )
     parser.add_argument(
         "--slurm-script",
         type=Path,
-        help="Generated Slurm script path (default: <run-dir>/run_preprocessing.slurm).",
+        help="Generated Slurm script path (default: <parent-dir>/run_preprocessing_all.slurm).",
     )
     parser.add_argument(
         "--miniwdl-config",
@@ -101,7 +119,11 @@ def discover_biosample_csv(run_dir: Path, explicit_path: Path | None) -> Path:
         return csv_path
 
     csv_candidates = sorted(path.resolve() for path in run_dir.glob("*.csv") if path.is_file())
-    named_candidates = [path for path in csv_candidates if "biosample" in path.name.lower()]
+    named_candidates = [
+        path
+        for path in csv_candidates
+        if "biosample" in path.name.lower() and ".updated." not in path.name.lower()
+    ]
 
     if len(named_candidates) == 1:
         return named_candidates[0]
@@ -133,6 +155,52 @@ def find_hifi_bams(run_dir: Path) -> list[Path]:
             f"no HiFi BAM files found directly in {run_dir}; expected filenames containing '.hifi_reads.'"
         )
     return bams
+
+
+def has_hifi_bams(run_dir: Path) -> bool:
+    return any(
+        path.is_file() and ".hifi_reads." in path.name
+        for path in run_dir.glob("*.bam")
+    )
+
+
+def discover_run_dirs(parent_dir: Path, repo_dir: Path) -> list[Path]:
+    if has_hifi_bams(parent_dir):
+        return [parent_dir]
+
+    run_dirs: list[Path] = []
+    for candidate in sorted(path for path in parent_dir.iterdir() if path.is_dir()):
+        resolved_candidate = candidate.resolve()
+        if resolved_candidate == repo_dir.resolve():
+            continue
+        if candidate.name in {"Kinnex-IsoSeq-WDL", "Kinnex-IsoSeq_WDL"}:
+            continue
+        if (candidate / ".git").exists() or (candidate / "backends" / "hpc").is_dir():
+            continue
+        if has_hifi_bams(candidate):
+            run_dirs.append(candidate.resolve())
+
+    if not run_dirs:
+        raise ValueError(
+            f"no HiFi run folders found directly under {parent_dir}; each run folder "
+            "must contain at least one *.hifi_reads.*.bam file"
+        )
+    return run_dirs
+
+
+def infer_segmentation_adapter_set(run_dir: Path) -> str | None:
+    match = PLEX_ADAPTER_PATTERN.search(run_dir.name)
+    if match is None:
+        return None
+    return f"{match.group(1)}-fold"
+
+
+def inputs_json_path(requested_path: Path | None, run_dir: Path) -> Path:
+    if requested_path is None:
+        return run_dir / "preprocessing.auto.inputs.json"
+    if requested_path.is_absolute():
+        return run_dir / requested_path.name
+    return run_dir / requested_path
 
 
 def ensure_repo(repo_dir: Path, repo_url: str, branch: str) -> Path:
@@ -171,15 +239,28 @@ def shell_quote(path: Path | str) -> str:
 
 def write_slurm_script(
     script_path: Path,
-    run_dir: Path,
+    parent_dir: Path,
     repo_dir: Path,
-    inputs_json: Path,
+    runs: list[PreparedRun],
     miniwdl_config: str,
     conda_env: str,
 ) -> None:
     output_path = script_path.resolve()
     config_path = Path(miniwdl_config).expanduser().resolve()
     workflow_path = repo_dir / WORKFLOW_RELATIVE_PATH
+    run_commands = []
+    for run in runs:
+        run_commands.append(
+            "if run_preprocessing "
+            f"{shell_quote(run.run_dir)} {shell_quote(run.inputs_json)}; then\n"
+            f"  echo {shell_quote(f'Completed {run.run_dir.name}')}\n"
+            "else\n"
+            f"  echo {shell_quote(f'FAILED: {run.run_dir.name}')} >&2\n"
+            f"  failures+=(\"{run.run_dir}\")\n"
+            "fi"
+        )
+
+    run_commands_text = "\n\n".join(run_commands)
     content = f'''#!/bin/bash
 
 #SBATCH -p atlas 
@@ -196,13 +277,28 @@ def write_slurm_script(
 
 set -euo pipefail
 
-cd {shell_quote(run_dir)}
+cd {shell_quote(parent_dir)}
 module load apptainer
 apptainer --version
 source activate {shell_quote(conda_env)}
-miniwdl run --cfg {shell_quote(config_path)} \\
-  -i {shell_quote(inputs_json)} \\
-  {shell_quote(workflow_path)}
+
+failures=()
+run_preprocessing() {{
+    local run_dir="$1"
+    local inputs_json="$2"
+    echo "Starting preprocessing: $run_dir"
+    (cd "$run_dir" && miniwdl run --cfg {shell_quote(config_path)} \\
+        -i "$inputs_json" \\
+        {shell_quote(workflow_path)})
+}}
+
+{run_commands_text}
+
+if (( ${{#failures[@]}} > 0 )); then
+    printf 'Failed runs:\\n'
+    printf '  %s\\n' "${{failures[@]}}"
+    exit 1
+fi
 '''
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(content, encoding="utf-8")
@@ -211,59 +307,80 @@ miniwdl run --cfg {shell_quote(config_path)} \\
 
 def main() -> int:
     args = parse_args()
-    run_dir = args.run_dir.resolve()
-    if not run_dir.is_dir():
-        raise ValueError(f"run directory does not exist or is not a directory: {run_dir}")
+    parent_dir = args.run_dir.resolve()
+    if not parent_dir.is_dir():
+        raise ValueError(
+            f"run directory does not exist or is not a directory: {parent_dir}"
+        )
 
-    hifi_bams = find_hifi_bams(run_dir)
-    biosample_csv = discover_biosample_csv(run_dir, args.biosample_csv)
-    repo_dir = args.repo_dir or run_dir / "Kinnex-IsoSeq-WDL"
+    repo_dir = (args.repo_dir or parent_dir / "Kinnex-IsoSeq-WDL").resolve()
+    run_dirs = discover_run_dirs(parent_dir, repo_dir)
     repo_dir = ensure_repo(repo_dir, args.repo_url, args.branch)
 
-    inputs_json = args.inputs_json or run_dir / "preprocessing.auto.inputs.json"
-    inputs_json = inputs_json.resolve()
-    builder_command = [
-        sys.executable,
-        str(repo_dir / BUILDER_RELATIVE_PATH),
-        "preprocessing",
-        "--repo-dir",
-        str(repo_dir),
-        "--run-dir",
-        str(run_dir),
-        "--biosample-csv",
-        str(biosample_csv),
-        "--output-json",
-        str(inputs_json),
-    ]
-    if args.segmentation_adapter_set is not None:
-        builder_command.extend(
-            ["--segmentation-adapter-set", args.segmentation_adapter_set]
+    prepared_runs: list[PreparedRun] = []
+    for run_dir in run_dirs:
+        hifi_bams = find_hifi_bams(run_dir)
+        biosample_csv = discover_biosample_csv(run_dir, args.biosample_csv)
+        inputs_json = inputs_json_path(args.inputs_json, run_dir).resolve()
+        adapter_set = args.segmentation_adapter_set or infer_segmentation_adapter_set(
+            run_dir
         )
-    for option, resource_path in (
-        ("--hifi-demux-barcodes", args.hifi_demux_barcodes),
-        ("--indexed-primers", args.indexed_primers),
-        ("--segmentation-adapters", args.segmentation_adapters),
-    ):
-        if resource_path is not None:
-            builder_command.extend([option, str(resource_path.resolve())])
 
-    print(f"HiFi BAM files detected: {len(hifi_bams)}")
-    print(f"Biosample CSV: {biosample_csv}")
-    subprocess.run(builder_command, check=True)
+        builder_command = [
+            sys.executable,
+            str(repo_dir / BUILDER_RELATIVE_PATH),
+            "preprocessing",
+            "--repo-dir",
+            str(repo_dir),
+            "--run-dir",
+            str(run_dir),
+            "--biosample-csv",
+            str(biosample_csv),
+            "--output-json",
+            str(inputs_json),
+            "--updated-biosample-csv",
+            str(run_dir / f"{biosample_csv.stem}.from_bam.updated.csv"),
+        ]
+        if adapter_set is not None:
+            builder_command.extend(["--segmentation-adapter-set", adapter_set])
+        for option, resource_path in (
+            ("--hifi-demux-barcodes", args.hifi_demux_barcodes),
+            ("--indexed-primers", args.indexed_primers),
+            ("--segmentation-adapters", args.segmentation_adapters),
+        ):
+            if resource_path is not None:
+                builder_command.extend([option, str(resource_path.resolve())])
 
-    slurm_script = args.slurm_script or run_dir / "run_preprocessing.slurm"
+        print(f"Preparing {run_dir} ({len(hifi_bams)} HiFi BAM file(s))")
+        if adapter_set is not None:
+            source = "command line" if args.segmentation_adapter_set else "folder name"
+            print(f"Segmentation adapter set: {adapter_set} (from {source})")
+        print(f"Biosample CSV: {biosample_csv}")
+        subprocess.run(builder_command, check=True)
+        prepared_runs.append(
+            PreparedRun(
+                run_dir=run_dir,
+                biosample_csv=biosample_csv,
+                inputs_json=inputs_json,
+                hifi_bam_count=len(hifi_bams),
+                segmentation_adapter_set=adapter_set,
+            )
+        )
+
+    slurm_script = args.slurm_script or parent_dir / "run_preprocessing_all.slurm"
     slurm_script = slurm_script.resolve()
     write_slurm_script(
         script_path=slurm_script,
-        run_dir=run_dir,
+        parent_dir=parent_dir,
         repo_dir=repo_dir,
-        inputs_json=inputs_json,
+        runs=prepared_runs,
         miniwdl_config=args.miniwdl_config,
         conda_env=args.conda_env,
     )
 
+    print(f"Prepared {len(prepared_runs)} run(s) in sequence")
     print(f"Slurm script: {slurm_script}")
-    print("Submit it from the run directory with: sbatch " + shell_quote(slurm_script))
+    print("Submit it with: sbatch " + shell_quote(slurm_script))
     return 0
 
 

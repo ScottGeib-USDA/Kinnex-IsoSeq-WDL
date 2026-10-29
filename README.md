@@ -104,6 +104,14 @@ The helper fills `hifi_sources`, `biosample_csv`, and `output_prefix` using the
 mode-specific HPC template. Use `--mode no_instrument_demux` or
 `--mode from_instrument_demux` when you need to force a mode.
 
+For instrument-demultiplexed BAMs, the helper reads the HiFi barcode from the
+BAM filename. If the BAMs have one unique barcode and the biosample CSV has one
+different HiFi Barcode group, it writes a corrected copy named
+`<biosample-name>.updated.csv` and uses that copy in the inputs JSON. The
+original sample sheet is preserved. Use `--updated-biosample-csv` to choose a
+different output path. When there are multiple unmatched barcode groups, the
+helper stops rather than guessing how sample assignments should map.
+
 Optional reference-file flags add or replace fields under the workflow's
 `reference_overrides` object: `--hifi-demux-barcodes`, `--indexed-primers`,
 `--segmentation-adapters`, `--genome-fasta`, and `--annotation-gtf-gz`. For
@@ -124,25 +132,34 @@ python3 scripts/build_inputs_from_files.py \
 
 ### Prepare a preprocessing Slurm job
 
-From a run folder containing HiFi BAM file(s) and one biosample CSV, use the
-Atlas setup helper to clone or reuse the workflow repository, generate the
-preprocessing inputs JSON, and write a Slurm batch script:
+From a parent folder containing one subfolder per run, use the Atlas setup
+helper to clone or reuse the workflow repository, generate a separate
+preprocessing inputs JSON for each run, and write one Slurm batch script that
+processes them in sequence:
 
 ```bash
-cd /path/to/run-folder
+cd /path/to/folder-of-runs
 python3 /path/to/Kinnex-IsoSeq-WDL/scripts/create_preprocessing_slurm.py
-sbatch run_preprocessing.slurm
+sbatch run_preprocessing_all.slurm
 ```
 
 The helper defaults to cloning
 `https://github.com/ScottGeib-USDA/Kinnex-IsoSeq-WDL.git` into
-`Kinnex-IsoSeq-WDL` under the run folder. Set `--repo-url` and `--branch` if
+`Kinnex-IsoSeq-WDL` under the parent folder. Set `--repo-url` and `--branch` if
 your changes are published elsewhere. The selected branch must contain
-`scripts/build_inputs_from_files.py`. The helper validates the biosample CSV,
-generates `preprocessing.auto.inputs.json`, and writes `run_preprocessing.slurm`
-with the Atlas account, partition, email, Apptainer setup, Conda environment,
-and miniwdl command. Use `--segmentation-adapter-set 8-fold`, `12-fold`, or
-`16-fold` to override the adapter set.
+`scripts/build_inputs_from_files.py`. Each immediate child folder containing a
+HiFi BAM is treated as a run and must contain one biosample CSV, unless
+`--biosample-csv` supplies a shared CSV for all runs. Each run gets its own
+`preprocessing.auto.inputs.json`. The helper writes one Slurm script with the
+Atlas account, partition, email, Apptainer setup, Conda environment, and one
+miniwdl invocation per run. Failed runs are reported at the end after the
+remaining runs have been attempted.
+
+The helper infers the packaged segmentation adapter set from each run folder
+name: `8Plex` selects `8-fold`, `12Plex` selects `12-fold`, and `16Plex`
+selects `16-fold`. An explicit `--segmentation-adapter-set` applies that value
+to every run and overrides folder-name inference. Other supplied resource
+options also apply to every run.
 
 For non-standard barcode or adapter resources, pass the corresponding FASTA
 paths to the helper:

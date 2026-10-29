@@ -85,6 +85,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--updated-biosample-csv",
+        type=Path,
+        help=(
+            "Output path for a biosample CSV updated from a single detected HiFi "
+            "barcode. Defaults to <biosample-name>.updated.csv beside the input."
+        ),
+    )
+    parser.add_argument(
         "--mode",
         choices=["auto", "no_instrument_demux", "from_instrument_demux"],
         default="auto",
@@ -344,6 +352,78 @@ def validate_biosample_csv(path: Path) -> None:
         raise ValueError("biosample CSV validation failed:\n  - " + "\n  - ".join(errors))
 
 
+def synchronize_biosample_hifi_barcode(
+    csv_path: Path,
+    demux_candidates: list[DemuxEntry],
+    output_path: Path | None,
+) -> Path:
+    detected_barcodes = {entry.hifi_barcode for entry in demux_candidates}
+    if not detected_barcodes:
+        return csv_path
+
+    with csv_path.open("rt", encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle))
+
+    if not rows:
+        raise ValueError(f"biosample CSV is empty: {csv_path}")
+
+    existing_barcodes = {
+        row[0].strip()
+        for row in rows[1:]
+        if row and any(cell.strip() for cell in row) and row[0].strip()
+    }
+    missing_barcodes = detected_barcodes - existing_barcodes
+    if not missing_barcodes:
+        return csv_path
+
+    if len(detected_barcodes) != 1 or len(existing_barcodes) != 1:
+        detected = ", ".join(sorted(detected_barcodes))
+        existing = ", ".join(sorted(existing_barcodes)) or "<none>"
+        raise ValueError(
+            "cannot safely update biosample CSV HiFi Barcode values: BAMs contain "
+            f"[{detected}], while the CSV contains [{existing}]. Update the CSV "
+            "barcode groups to match the BAM filenames or provide an unambiguous "
+            "single-barcode-group CSV."
+        )
+
+    detected_barcode = next(iter(detected_barcodes))
+    if not is_valid_barcode_pair(detected_barcode):
+        raise ValueError(
+            f"HiFi barcode parsed from BAM filename is not a barcode pair: {detected_barcode}"
+        )
+
+    updated_path = output_path or csv_path.with_name(
+        f"{csv_path.stem}.updated{csv_path.suffix}"
+    )
+    updated_path = updated_path.resolve()
+    if updated_path == csv_path.resolve():
+        raise ValueError(
+            "--updated-biosample-csv must be different from --biosample-csv; "
+            "the original sample sheet is preserved"
+        )
+
+    updated_rows = [rows[0][:]]
+    for row in rows[1:]:
+        if not row or all(cell.strip() == "" for cell in row):
+            updated_rows.append(row)
+            continue
+        updated_row = row[:]
+        updated_row[0] = detected_barcode
+        updated_rows.append(updated_row)
+
+    updated_path.parent.mkdir(parents=True, exist_ok=True)
+    with updated_path.open("wt", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerows(updated_rows)
+
+    validate_biosample_csv(updated_path)
+    print(
+        f"Updated biosample CSV HiFi Barcode column from "
+        f"{next(iter(existing_barcodes))} to {detected_barcode}: {updated_path}"
+    )
+    return updated_path
+
+
 def resolve_repo_root(args: argparse.Namespace) -> Path:
     if args.repo_dir is not None:
         candidates = [args.repo_dir.resolve()]
@@ -513,6 +593,11 @@ def main() -> int:
             args.biosample_csv.resolve()
             if args.biosample_csv is not None
             else discover_biosample_csv(run_dir)
+        )
+        biosample_csv = synchronize_biosample_hifi_barcode(
+            biosample_csv,
+            demux_candidates if mode == "from_instrument_demux" else [],
+            args.updated_biosample_csv,
         )
         validate_biosample_csv(biosample_csv)
 
