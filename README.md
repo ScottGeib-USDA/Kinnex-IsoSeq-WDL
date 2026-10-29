@@ -122,6 +122,42 @@ python3 scripts/build_inputs_from_files.py \
   secondary_analysis
 ```
 
+### Prepare a preprocessing Slurm job
+
+From a run folder containing HiFi BAM file(s) and one biosample CSV, use the
+Atlas setup helper to clone or reuse the workflow repository, generate the
+preprocessing inputs JSON, and write a Slurm batch script:
+
+```bash
+cd /path/to/run-folder
+python3 /path/to/Kinnex-IsoSeq-WDL/scripts/create_preprocessing_slurm.py
+sbatch run_preprocessing.slurm
+```
+
+The helper defaults to cloning
+`https://github.com/ScottGeib-USDA/Kinnex-IsoSeq-WDL.git` into
+`Kinnex-IsoSeq-WDL` under the run folder. Set `--repo-url` and `--branch` if
+your changes are published elsewhere. The selected branch must contain
+`scripts/build_inputs_from_files.py`. The helper validates the biosample CSV,
+generates `preprocessing.auto.inputs.json`, and writes `run_preprocessing.slurm`
+with the Atlas account, partition, email, Apptainer setup, Conda environment,
+and miniwdl command. Use `--segmentation-adapter-set 8-fold`, `12-fold`, or
+`16-fold` to override the adapter set.
+
+For non-standard barcode or adapter resources, pass the corresponding FASTA
+paths to the helper:
+
+```bash
+python3 /path/to/Kinnex-IsoSeq-WDL/scripts/create_preprocessing_slurm.py \
+  --hifi-demux-barcodes /shared/refs/hifi_barcodes.fasta \
+  --indexed-primers /shared/refs/custom_primers.fasta \
+  --segmentation-adapters /shared/refs/custom_adapters.fasta
+```
+
+These are written to `preprocessing.reference_overrides` in the generated JSON.
+The files must be readable from the Slurm compute nodes. A custom indexed-primer
+or segmentation-adapter FASTA replaces its corresponding packaged-set selector.
+
 ### Run the workflow
 
 ```bash
