@@ -161,6 +161,12 @@ selects `16-fold`. An explicit `--segmentation-adapter-set` applies that value
 to every run and overrides folder-name inference. Other supplied resource
 options also apply to every run.
 
+The generated job sources Atlas Conda's shell hook from
+`/project/ag100pest/scott.geib/miniconda3/etc/profile.d/conda.sh` before running
+`conda activate /home/scott.geib/.conda/envs/isoseq_wdl`. Override these paths
+with `--conda-sh` and `--conda-env` if your cluster uses a different Conda
+installation or environment.
+
 For non-standard barcode or adapter resources, pass the corresponding FASTA
 paths to the helper:
 

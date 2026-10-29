@@ -13,6 +13,7 @@ from pathlib import Path
 
 DEFAULT_REPO_URL = "https://github.com/ScottGeib-USDA/Kinnex-IsoSeq-WDL.git"
 DEFAULT_CONDA_ENV = "/home/scott.geib/.conda/envs/isoseq_wdl"
+DEFAULT_CONDA_SH = "/project/ag100pest/scott.geib/miniconda3/etc/profile.d/conda.sh"
 DEFAULT_MINIWDL_CONFIG = "~/.config/miniwdl.cfg"
 BUILDER_RELATIVE_PATH = Path("scripts/build_inputs_from_files.py")
 WORKFLOW_RELATIVE_PATH = Path("workflows/preprocessing.wdl")
@@ -87,6 +88,11 @@ def parse_args() -> argparse.Namespace:
         "--conda-env",
         default=DEFAULT_CONDA_ENV,
         help=f"Conda environment activated by the batch job (default: {DEFAULT_CONDA_ENV}).",
+    )
+    parser.add_argument(
+        "--conda-sh",
+        default=DEFAULT_CONDA_SH,
+        help=f"Path to Conda's shell hook (default: {DEFAULT_CONDA_SH}).",
     )
     parser.add_argument(
         "--segmentation-adapter-set",
@@ -244,6 +250,7 @@ def write_slurm_script(
     runs: list[PreparedRun],
     miniwdl_config: str,
     conda_env: str,
+    conda_sh: str,
 ) -> None:
     output_path = script_path.resolve()
     config_path = Path(miniwdl_config).expanduser().resolve()
@@ -281,7 +288,8 @@ cd {shell_quote(parent_dir)}
 module load apptainer
 apptainer --version
 set +u
-source activate {shell_quote(conda_env)}
+source {shell_quote(conda_sh)}
+conda activate {shell_quote(conda_env)}
 set -u
 
 failures=()
@@ -378,6 +386,7 @@ def main() -> int:
         runs=prepared_runs,
         miniwdl_config=args.miniwdl_config,
         conda_env=args.conda_env,
+        conda_sh=args.conda_sh,
     )
 
     print(f"Prepared {len(prepared_runs)} run(s) in sequence")
