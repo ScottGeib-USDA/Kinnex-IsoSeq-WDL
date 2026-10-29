@@ -132,6 +132,24 @@ python3 scripts/build_inputs_from_files.py \
 
 ### Prepare a preprocessing Slurm job
 
+After each successful run, the generated Slurm script collects final FLNC BAMs
+and their `.bam.pbi` indexes into that run's flat `results/` folder. It uses
+`samtools view -H` to read the single sample name from the BAM's `@RG SM` tags
+and names the copies `<sample>.<original-bam-name>`. Original workflow outputs
+are left intact so miniwdl links and call caching remain valid. Existing result
+files are not overwritten. Samtools must be available in the job's `PATH`.
+
+For an already completed run, run the collector from its sample folder:
+
+```bash
+python3 /path/to/Kinnex-IsoSeq-WDL/scripts/collect_flnc_results.py . \
+  --results-dir results
+```
+
+The collector uses `_LAST/outputs.json` to select the latest execution. You can
+instead pass a specific timestamped execution folder or its `outputs.json`.
+Only final outputs listed in that manifest are exported, not intermediate BAMs.
+
 From a parent folder containing one subfolder per run, use the Atlas setup
 helper to clone or reuse the workflow repository, generate a separate
 preprocessing inputs JSON for each run, and write one Slurm batch script that

@@ -16,6 +16,7 @@ DEFAULT_CONDA_ENV = "/home/scott.geib/.conda/envs/isoseq_wdl"
 DEFAULT_CONDA_SH = "/project/ag100pest/scott.geib/miniconda3/etc/profile.d/conda.sh"
 DEFAULT_MINIWDL_CONFIG = "~/.config/miniwdl.cfg"
 BUILDER_RELATIVE_PATH = Path("scripts/build_inputs_from_files.py")
+COLLECTOR_RELATIVE_PATH = Path("scripts/collect_flnc_results.py")
 WORKFLOW_RELATIVE_PATH = Path("workflows/preprocessing.wdl")
 PLEX_ADAPTER_PATTERN = re.compile(r"(?<!\d)(8|12|16)Plex\b", re.IGNORECASE)
 
@@ -236,6 +237,8 @@ def ensure_repo(repo_dir: Path, repo_url: str, branch: str) -> Path:
         )
     if not workflow.is_file():
         raise ValueError(f"preprocessing WDL not found: {workflow}")
+    if not (checkout / COLLECTOR_RELATIVE_PATH).is_file():
+        raise ValueError(f"results collector not found; update the repository checkout: {checkout}")
     return checkout
 
 
@@ -298,8 +301,11 @@ run_preprocessing() {{
     local inputs_json="$2"
     echo "Starting preprocessing: $run_dir"
     (cd "$run_dir" && miniwdl run --cfg {shell_quote(config_path)} \\
+        --output "$run_dir/preprocessing.outputs.json" \\
         -i "$inputs_json" \\
-        {shell_quote(workflow_path)})
+        {shell_quote(workflow_path)} && \\
+        python3 {shell_quote(repo_dir / COLLECTOR_RELATIVE_PATH)} \\
+        "$run_dir/preprocessing.outputs.json" --results-dir "$run_dir/results")
 }}
 
 {run_commands_text}
