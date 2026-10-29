@@ -132,6 +132,41 @@ python3 scripts/build_inputs_from_files.py \
 
 ### Prepare a preprocessing Slurm job
 
+The collector's source and destination are optional. Running it without
+arguments collects from the current folder's `_LAST` execution into
+`./results`:
+
+```bash
+python3 /path/to/Kinnex-IsoSeq-WDL/scripts/collect_flnc_results.py
+```
+
+Use `--diagnostics-only` to collect just logs and reports with the same defaults.
+If you specify a source elsewhere but omit `--results-dir`, results are still
+written to `./results` in your current working directory.
+
+The results collector also saves logs and selected reports under
+`results/diagnostics/<execution-name>/<step>/`, preserving task paths to keep
+scattered tasks distinct. These include workflow/task logs, stderr/stdout,
+task Slurm output, input/output JSON, Skera summaries, Lima counts/reports,
+and refine reports. It does not collect intermediate BAMs/indexes, reference
+files, container images, or per-read adapter tables. Individual diagnostic
+files over 10 MiB are skipped with a warning. Repeating diagnostic collection
+refreshes files for the same execution; final BAM exports still refuse to
+overwrite existing files.
+
+Generated Slurm scripts attempt diagnostic export after a failed miniwdl run
+as well, preserving the workflow's failure status. For manual diagnostics-only
+collection, including a failed run without an output manifest:
+
+```bash
+python3 /path/to/Kinnex-IsoSeq-WDL/scripts/collect_flnc_results.py . \
+  --results-dir results --diagnostics-only
+```
+
+This selects `_LAST` in the current folder. Pass a specific execution directory
+instead to select an earlier run. Diagnostic-only collection does not require
+samtools or completed FLNC BAMs.
+
 After each successful run, the generated Slurm script collects final FLNC BAMs
 and their `.bam.pbi` indexes into that run's flat `results/` folder. It uses
 `samtools view -H` to read the single sample name from the BAM's `@RG SM` tags

@@ -5,11 +5,75 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from fnmatch import fnmatch
+
+
+DIAGNOSTIC_PATTERNS = (
+    "workflow.log", "task.log", "stderr.txt", "stdout.txt", "slurm-*.out",
+    "slurm_singularity.log.txt", "inputs.json", "outputs.json", "error.json",
+    "command", "*.log", "*.summary", "*.summary.csv", "*.summary.json",
+    "*.counts", "*.lima.report", "*.lima.guess", "*.lima.guess.json",
+    "*.report.csv", "*.report.json", "*.read_lengths.csv", "*.ligations.csv",
+    "preprocessing_input_validation.txt",
+)
+
+
+def collect_diagnostics(source: Path, results_dir: Path) -> None:
+    execution = source.resolve()
+    if execution.is_file():
+        with execution.open(encoding="utf-8") as handle:
+            document = json.load(handle)
+        execution = Path(document.get("dir", str(execution.parent))).resolve()
+    elif (execution / "_LAST").exists():
+        execution = (execution / "_LAST").resolve()
+    if not execution.is_dir() or not (execution / "workflow.log").is_file():
+        raise ValueError(f"not a miniwdl execution directory with workflow.log: {execution}")
+
+    destination_root = results_dir / "diagnostics" / execution.name
+    copied = 0
+    for directory, subdirs, filenames in os.walk(execution, followlinks=False):
+        subdirs[:] = [
+            name for name in subdirs
+            if name not in {"out", "_miniwdl_inputs", "write_", "wdl", "diagnostics", "results"}
+            and not (Path(directory) / name).is_symlink()
+        ]
+        for filename in filenames:
+            if not any(fnmatch(filename, pattern) for pattern in DIAGNOSTIC_PATTERNS):
+                continue
+            path = Path(directory) / filename
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.stat().st_size > 10 * 1024 * 1024:
+                print(f"WARNING: diagnostic exceeds 10 MiB; skipped: {path}", file=sys.stderr)
+                continue
+            relative = path.relative_to(execution)
+            calls = [part for part in relative.parts[:-1] if part.startswith("call-")]
+            task = calls[-1] if calls else "workflow"
+            if "skera" in task:
+                step = "skera"
+            elif "cdna_lima" in task or "derive_cdna" in task:
+                step = "cdna_lima"
+            elif "refine" in task:
+                step = "isoseq_refine"
+            elif "validate_preprocessing" in task:
+                step = "input_validation"
+            elif "reference" in task:
+                step = "reference_resources"
+            elif "hifi" in task or "lima" in task:
+                step = "hifi_demux"
+            else:
+                step = "workflow"
+            destination = destination_root / step / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            copied += 1
+    print(f"Collected {copied} diagnostic files: {destination_root}")
 
 
 def resolve_manifest(source: Path) -> Path:
@@ -89,11 +153,21 @@ def collect_results(manifest: Path, results_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "manifest", type=Path,
-        help="Output JSON, execution directory, or run folder containing _LAST/outputs.json",
+        "manifest", type=Path, nargs="?", default=Path("."),
+        help="Output JSON, execution directory, or run folder containing _LAST/outputs.json (default: current directory)",
     )
-    parser.add_argument("--results-dir", type=Path, required=True)
+    parser.add_argument(
+        "--results-dir", type=Path, default=Path("results"),
+        help="Destination folder (default: ./results in the current directory)",
+    )
+    parser.add_argument(
+        "--diagnostics-only", action="store_true",
+        help="Collect logs and selected reports, including from failed runs; do not export BAMs",
+    )
     args = parser.parse_args()
+    collect_diagnostics(args.manifest.resolve(), args.results_dir.resolve())
+    if args.diagnostics_only:
+        return
     collect_results(args.manifest.resolve(), args.results_dir.resolve())
 
 
