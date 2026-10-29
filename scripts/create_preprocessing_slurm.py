@@ -280,7 +280,9 @@ set -euo pipefail
 cd {shell_quote(parent_dir)}
 module load apptainer
 apptainer --version
+set +u
 source activate {shell_quote(conda_env)}
+set -u
 
 failures=()
 run_preprocessing() {{
