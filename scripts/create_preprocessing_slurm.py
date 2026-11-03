@@ -303,11 +303,10 @@ run_preprocessing() {{
     previous_last="$(readlink -f "$run_dir/_LAST" || true)"
     echo "Starting preprocessing: $run_dir"
     if (cd "$run_dir" && miniwdl run --cfg {shell_quote(config_path)} \\
-        --output "$run_dir/preprocessing.outputs.json" \\
         -i "$inputs_json" \\
         {shell_quote(workflow_path)}); then
         python3 {shell_quote(repo_dir / COLLECTOR_RELATIVE_PATH)} \\
-            "$run_dir/preprocessing.outputs.json" --results-dir "$run_dir/results"
+            "$run_dir" --results-dir "$run_dir/results"
     else
         local workflow_status=$?
         local current_last
